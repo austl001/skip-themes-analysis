@@ -1,0 +1,1596 @@
+---
+title: "Analysis of SKIP Code Data for CPM048 & CPW131"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author:
+    - Luke Austin^[luke.austin@mosl.co.uk] (Data Scientist, MOSL)
+    - Hendriico Merila^[hendriico.merila@mosl.co.uk] (Junior Data Scientist, MOSL)
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+    collapsed: false
+    number_sections: true
+  pdf_document:
+    toc: yes
+    number_sections: true
+  html_notebook:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+    number_sections: true
+  github_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+    number_sections: true
+---
+
+# Introduction
+
+## Background
+
+On 3rd December 2021, Castle Water raised a Change Proposal (CP) that proposed suspending charges on the Market Performance Standards (MPS) MPS17, MPS18 and MPS19 until the reform of the Market Performance Framework (MPF) has been completed ([CPM048 & CPW131: Suspending certain MPS charges pending full review of the MPF](https://mosl.co.uk/change/changes/suspending-certain-mps-charges-pending-full-review-of-the-mpf)). Their position is that a significant level of performance charges incurred by retailers are due to causes outside retailer control.
+
+To evidence lack of control over performance failures, retailers were asked to provide SKIP data for a random sample of missed meter read submissions that incurred a performance charge between April and December 2021. Retailers were also asked to  categorise the SKIPs to provide insight into whether they were outside or within the retailer's control. This data can then be used to assess whether it would be reasonable to suspend performance charges or not. 
+
+Note that not all retailers provided data as it was optional. 
+
+## Summary
+
+This report shows MOSL's findings from an analysis of the SKIP code and performance data provided by retailers to assess the extent to which performance failures are within retailers' control. 
+
+We used the initial categorisations provided by retailers and made *a priori* assumptions regarding whether they were outside or within retailer control. These assumptions were then radically updated using text analysis to identify themes within the SKIP data. These themes provided clearer evidence for performance failures to be labelled as outside or within retailer control. 
+
+We found that performance failures in the sample likely to be outside retailer control ranges between 30-80%. This large range is due to having several options for treating the 40% of performance failures that were unspecified or uncategorised by retailers or lacked any detailed information that would enable MOSL to reliably assign control of the performance failure. 
+
+We have identified the following options for treating unmatched and uncategorised SKIPs (with the resulting overall percentage of performance failures outside retailer control):
+
+1. Include and categorise control as “unknown” (36% of SKIPs outside retailer control) 
+1. Include and assume within retailer control (36%)
+1. Include and assume outside retailer control (85%)
+1. Exclude from the sample or weighted re-assignment to other themes (71%)
+1. Unweighted re-assignment to other themes (68%)
+1. Probabilistic re-assignment of control using classification model (40%)
+
+Based on our assessment of each of the themes, we recommend using the classification model to re-assign control. This suggests approximately 40% of performance failures were outside retailer control.
+
+Lastly, we considered the relationship of these performance failures with the stipulation introduced by CPW030 into CSD0002 that five percent of total MPS18 and MPS19 tasks may fail without incurring a charge. This allowance, although controversial, was intended to protect retailers from performance failures and charges outside their control. We found that, with an average MPS performance of 88% during the period, and assuming 40% performance failures outside retailer control, the "net exposure" of retailers to charges outside their control was 5%. This analysis therefore provides evidence that the allowance is too low to account for the volume of performance failures outside retailer control. Instead, we found that a minimum allowance of 20% would be required to eliminate the net exposure to failures outside retailer control. 
+
+Our recommendations are the following:
+
+* The charging framework should be reviewed as a high priority as part of the MPF reform due to the relatively high level of performance failures outside retailer control
+* In particular, a more detailed review of performance failures outside retailer control (especially access issues) is required to fully assess their impact and identify mitigations and/or resolutions
+* However, whilst the level of performance failures outside retailer control is high, we note that this is at least partially mitigated by the allowance; and so it is questionable whether an immediate and full suspension of MPS charges is justified given the average 5% net exposure to retailers after taking into account the 5% allowance
+* Another possible near-term response to consider would be to sufficiently increase the 5% allowance to reduce or eliminate retailer's net exposure to performance failures outside their control.
+
+We also note the following points:
+
+* Longer, more detailed SKIP descriptions indicate performance failures that are more likely to be outside retailer control, whereas shorter SKIP descriptions are more likely to be within retailer control; and this may indicate that meter reading service providers generally provide more detail when the wholesaler needs to resolve an issue.
+* Retailers with higher performance are more likely to have a higher proportion of performance failures outside their control, whereas poor performers tend to have a more balanced mix of failures within and outside their control: this could be because good-performers would be expected to succeed on tasks within their control but fail on those outside their control, whereas the failures of poor-performers would be more randomly distributed between outside and within their control
+* On average, meter read failures outside the retailer's control (and which are largely within the wholesaler's control) are more likely to become and remain long unread, which would lead to repeat performance charges; whereas, those within retailer control are more likely to be resolved or not become long unread in the first place.
+  
+# Data and methodology
+
+This report is produced using R and Rmarkdown. The underlying code can be viewed by clicking on the '_Code_' button in this document.
+  
+```{r, warning=FALSE, message=FALSE, }
+
+# Loading required R libraries for loading data, data manipulation, analysis, and visualisation. 
+
+library(kableExtra)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(tidytext)
+library(wordcloud)
+library(tidyr)
+library(forcats)
+library(igraph)
+library(ggraph)
+library(DT)
+
+```
+
+## Overview of data
+  
+The data consists of meter read SKIP codes, i.e. reasons for why a meter has not been read, provided by retailers. MOSL requested SKIP codes for specific meters based on a random sample of meters that had failed against a Market Performance Standard (MPS) under either MPS17, MPS18 or MPS19 at least once between April and December 2021. 
+  
+```{r, message=FALSE, warning=FALSE}
+
+# Setting seed for anonymising the retailer names by randomly re-assigning factor levels
+
+set.seed(123)
+
+# Importing data, converting all columns to upper camel case, renaming awkward column names and anonymising retailer names
+
+retailer_count <- vroom::vroom(file = "data/RetailerCount.csv")
+
+MPS_data <- vroom::vroom(file = "data/MPS_Performance.csv")
+
+
+skips <- vroom::vroom(
+    file = "data/skip_code_data.csv", 
+    .name_repair = ~ janitor::make_clean_names(., case = "upper_camel")
+    ) %>%
+  rename(
+    LumStatus = `LumStatusAsAtDate`, 
+    Mps = `MpsStandardFailed`
+    )  %>% 
+  left_join(retailer_count, by = c("RetailerId" = "RetailerID")) %>%
+  left_join(MPS_data, by = c("RetailerId" = "RetailerID")) %>%
+  mutate(
+    RetailerId = as.factor(RetailerId),
+    SkipCodeCategory = replace_na(SkipCodeCategory, "Unspecified"),
+    SkipCodeCategory = stringr::str_to_sentence(SkipCodeCategory),
+    SkipControl = case_when(
+      SkipCodeCategory %in% c(
+        "Retailer access", "Vacant", "Retailer asset"
+        ) ~ "Within retailer control", 
+      SkipCodeCategory %in% c(
+        "Skip not yet available", "Unable to determine", 
+        "Unspecified"
+        ) ~ "Unknown",
+      TRUE ~ "Outside retailer control"
+      ),
+    SkipControl = factor(
+      SkipControl, 
+      levels = c(
+        "Outside retailer control", 
+        "Within retailer control", 
+        "Unknown"
+        )
+      ),
+    SkipCodeReason = tolower(iconv(SkipCodeReason, "UTF-8", "UTF-8")),
+    SkipLength = str_length(SkipCodeReason),
+    InitialMeterReadDate = as.Date(InitialMeterReadDate, format = "%d/%m/%Y"),
+    InitiatingEventDate = as.Date(InitiatingEventDate, format = "%d/%m/%Y"),
+    LatestReadInSystem = as.Date(LatestReadInSystem, format = "%d/%m/%Y"),
+    MpsFailurePeriod = as.Date(MpsFailurePeriod, format = "%d/%m/%Y"),
+    SkipDate = as.Date(SkipDate, format = "%d/%m/%Y"),
+    MeterLocationCode = factor(
+      MeterLocationCode, 
+      levels = c("I", "O"), 
+      labels = c("Internal", "External")
+      ),
+    MeterReadMinimumFrequency = factor(
+      MeterReadMinimumFrequency,
+      levels = c("B", "M"), 
+      labels = c("Bi-annual", "Monthly")
+      ),
+    LumStatus = factor(
+      LumStatus,
+      levels = c("Read", "LongUnread", "LegacyLongUnread"),
+      labels = c("Read", "Long unread", "Legacy long unread")
+      )
+    ) %>%
+  group_by(factor(RetailerId, levels = sample(levels(RetailerId)))) %>%
+  mutate(RetailerIdAnon = paste("Retailer", cur_group_id())) %>%
+  ungroup()
+
+retailers <- unique(skips$RetailerId)
+
+retailer_count <- retailer_count %>%
+  mutate(ProvidedData = if_else(RetailerID %in% retailers, 1, 0)) 
+
+unique_skips <- skips %>%
+  distinct(
+    Spid, MeterSerialNumber, InitialMeterReadDate, 
+    InitiatingEventDate, SkipCodeReason
+    ) %>%
+  nrow()
+
+retailer_types <- retailer_count %>%
+  group_by(RetailerType) %>%
+  summarise(n = sum(ProvidedData))
+
+retailer_count_summary <- retailer_count %>% 
+  group_by(ProvidedData) %>% 
+  summarise(n = sum(SPIDs)) %>% 
+  ungroup() %>%
+  mutate(Proportion = n / sum(n)) %>%
+  filter(ProvidedData == 1)
+
+```
+  
+The data has `r scales::comma(nrow(skips))` rows and `r ncol(skips)` columns. Each row corresponds to a performance failure against one of the above mentioned standards. The number of unique SKIPs, or missed meter reads, is `r scales::comma(unique_skips)`. 
+  
+Of the retailers asked to provide their SKIP code data, `r length(unique(skips$RetailerId))` responded. This represents `r scales::percent(mean(retailer_count$ProvidedData), accuracy = 1)` of retailers and `r scales::percent(retailer_count_summary$Proportion, accuracy = 1)` of the market based on the total number of supply points. The types of retailers that responded include the following:
+
+* `r retailer_types$n[retailer_types$RetailerType == "Associated Retailer"]` were associated, 
+* `r retailer_types$n[retailer_types$RetailerType == "Unassociated Retailer"]` were unassociated and 
+* `r retailer_types$n[retailer_types$RetailerType == "Self-supply"]` were self-supply. 
+  
+From the table below it can be seen that self-supply retailers are overrepresented in the sample SKIP code data compared to the market share, while NAVs and unassociated retailers are underrepresented. 
+  
+```{r, message=FALSE}
+
+retailer_types %>%
+  mutate(
+    proportion = scales::percent(n / sum(n)),
+    ProvidedData = paste0(n, " (", proportion, ")")
+  ) %>%
+  select(RetailerType, ProvidedData) %>%
+  left_join(
+    retailer_count %>%
+      group_by(RetailerType) %>%
+      summarise(n = n()) %>%
+      mutate(
+        proportion = scales::percent(n / sum(n)),
+        MarketLevel = paste0(n, " (", proportion, ")")
+      ) %>%
+      select(RetailerType, MarketLevel)
+  ) %>%
+  kbl(
+    caption = "Count of Retailers that Provided SKIP Code Data against Market Level Retailer Counts",
+    col.names = c("Retailer Type", "Count in the SKIP Code Data", "Market Count"),
+    align = "lcc"
+  ) %>%
+  kable_classic_2(c("striped", "hover")) %>%
+  kable_styling(full_width = TRUE)
+  
+```
+  
+We also note the following regarding the sample: 
+
+* **MPS failures**: MPS18 and MPS19 comprise almost all failures, with only a small share being MPS17. Total failures decreases from July 2019 onwards, with significant fall in MPS18 failures in October and November. It is unclear whether there are seasonality effects causing this or whether it is an oddity peculiar to the sample. 
+* **Meter location**: The majority of meters (`r scales::percent(mean(skips$MeterLocationCode=="External", na.rm = TRUE), accuracy = 0.1)`) are external. This is slightly lower than the market average level of external meters (73.6%). We note as well that this indicator is not always reliable and does not account for more nuanced situations (e.g. a meter "external" to the main building but fenced off).
+* **Meter read minimum frequency**: Bi-annual read meters account for more than 70% of meters in the sample and over half of the performance failures; whereas monthly read meters account for around a quarter of meters but nearly half of performance failures. Monthly read meters are potentially overrepresented in this sample, as only around 1% of all market meters are monthly read, however we did not find significant differences between bi-annual and monthly meters so did not take steps to address this issue. 
+* **Meter read status**: More than 60% of the meters sampled were read within the last 12 months and only 30% were classed as "long unread" (i.e. they have not been read for more than 12 months).
+  
+## {.tabset .unlisted .unnumbered}
+
+### Performance standards {.unlisted .unnumbered}
+
+```{r, fig.width=10, message=FALSE, warning=FALSE, error=FALSE}
+
+plot1 <- skips %>%
+  janitor::tabyl(Mps) %>%
+  ggplot(aes(Mps, n)) + 
+  geom_col(aes(Mps, n, fill = Mps), colour = "black") +
+  geom_text(aes(label = scales::percent(percent, accuracy = 0.1), y = n + 150)) +
+  scale_y_continuous(labels = scales::comma) +
+  MOSLR::scale_fill_MOSL() + 
+  theme_bw() +
+  theme(legend.position = "none") +
+  labs(
+    title = "Performance Failure by MPS",
+    subtitle = "Total failures broken down by performance standard",
+    x = "", y = "", fill = ""
+  )
+  
+plot2 <- skips %>%
+  count(Mps, MpsFailurePeriod) %>%
+  ggplot() + 
+  geom_col(
+    aes(x = MpsFailurePeriod, y = n, fill = Mps), 
+    position = "stack", colour = "black"
+    ) + 
+  scale_y_continuous(labels = scales::comma) +
+  MOSLR::scale_fill_MOSL() + 
+  theme_bw() + 
+  theme(legend.position = "none") +
+  labs(
+    title = "Performance Failures by Standard and Period",
+    subtitle = "Total failures by period and market performance standard",
+    x = "Performance Failure Period", y = "", fill = ""
+  )
+
+plot(gridExtra::arrangeGrob(plot1, plot2, ncol = 2))
+
+```
+  
+### Meter location {.unlisted .unnumbered}
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skips %>%
+  count(MeterLocationCode) %>%
+  mutate(Proportion = n / nrow(skips)) %>%
+  ggplot(aes(MeterLocationCode, n)) + 
+  geom_col(aes(fill = MeterLocationCode), colour = "black") + 
+  geom_text(aes(label = scales::percent(Proportion, accuracy = 0.1), y = n + 250)) +
+  scale_y_continuous(labels = scales::comma) + 
+  MOSLR::scale_fill_MOSL() + 
+  theme_bw() + 
+  theme(legend.position = "none") + 
+  labs(
+    title = "Meter Location",
+    subtitle = "Breakdown of performance failures by location of meter",
+    x = "", y = "", fill = ""
+  )
+  
+
+```
+  
+### Minimum read frequency {.unlisted .unnumbered}
+
+```{r, fig.width=10, message=FALSE, warning=FALSE, error=FALSE}
+
+plot1 <- skips %>%
+  distinct(Spid, MeterSerialNumber, InitialMeterReadDate, .keep_all = TRUE) %>%
+  count(MeterReadMinimumFrequency) %>% 
+  mutate(Proportion = n / sum(n)) %>%
+  ggplot(aes(MeterReadMinimumFrequency, n)) + 
+  geom_col(aes(fill = MeterReadMinimumFrequency), colour = "black") + 
+  geom_text(aes(label = scales::percent(Proportion, accuracy = 0.1), y = n + 150)) +
+  scale_y_continuous(labels = scales::comma) + 
+  MOSLR::scale_fill_MOSL() + 
+  theme_bw() + 
+  theme(legend.position = "none") + 
+  labs(
+    title = "Meters and Minimum Read Frequency",
+    subtitle = "Count of meters broken down by minimum read frequency",
+    x = "Meter Read Minimum Freqency", y = "Meter Count", fill = ""
+  )
+
+plot2 <- skips %>% 
+  count(MeterReadMinimumFrequency) %>% 
+  mutate(Proportion = n / nrow(skips)) %>%
+  ggplot(aes(MeterReadMinimumFrequency, n)) + 
+  geom_col(aes(fill = MeterReadMinimumFrequency), colour = "black") + 
+  geom_text(aes(label = scales::percent(Proportion, accuracy = 0.1), y = n + 150)) +
+  scale_y_continuous(labels = scales::comma) + 
+  MOSLR::scale_fill_MOSL() + 
+  theme_bw() + 
+  theme(legend.position = "none") + 
+  labs(
+    title = "Performance Failures and Minimum Read Frequency",
+    subtitle = "Count of performance failures broken down by minimum read frequency",
+    x = "Meter Read Minimum Freqency", y = "Performance Failures", fill = ""
+  )
+
+plot(gridExtra::arrangeGrob(plot1, plot2, ncol = 2))
+
+```
+
+### Read status {.unlisted .unnumbered}
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skips %>%
+  distinct(Spid, MeterSerialNumber, InitialMeterReadDate, .keep_all = TRUE) %>%
+  count(LumStatus) %>%
+  mutate(Proportion = n / sum(n)) %>%
+  ggplot(aes(LumStatus, n)) + 
+  geom_col(aes(fill = LumStatus), colour = "black") + 
+  geom_text(aes(label = scales::percent(Proportion, accuracy = 0.1), y = n + 150)) +
+  scale_y_continuous(labels = scales::comma) + 
+  MOSLR::scale_fill_MOSL() + 
+  theme_bw() + 
+  theme(legend.position = "none") + 
+  labs(
+    title = "Meter Read Status",
+    subtitle = "Meters broken down by their read status",
+    x = "", y = "", fill = ""
+  )
+  
+
+```
+  
+## {.unlisted .unnumbered}
+  
+## Variables of interest
+
+The variables of interest are the following:
+ 
+1. **SKIP code**: A short code or description identifying why a meter was not read. The codes, whilst often containing useful information, are not standardised across retailers and can have a high level of granularity (provided by retailers).
+1. **SKIP code category**: A high-level list of pre-defined categories for why a meter was not read (provided by retailers).
+1. **SKIP code reason**: Free text field outlining in more detail why it was not possible to obtain the meter read (provided by retailers).
+1. **Read status**: The read status of the meter, indicating whether it has been read within the last 12 months (read), more than 12 months (long unread) or not since market opening or earlier (legacy long unread).
+  
+There are `r NROW(unique(skips$SkipCodeCategory))` SKIP code categories. They are shown in the table below, grouped according to our initial, *a priori* assumptions of whether they represent SKIPs or performance failures within the retailers control. 
+
+Note, as a necessary starting point, we have initially assumed that "retailer" categories are within the control of the retailer, and "wholesaler" categories are not; and additionally, that the control of unspecified, undetermined and unavailable SKIPs are "unknown." However, we challenge these assumptions later in the paper. 
+  
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skips %>%
+  distinct(SkipCodeCategory, SkipControl) %>%
+  pivot_wider(names_from = SkipControl, values_from = SkipCodeCategory) %>%
+  kbl(
+    caption = "SKIP categories and initial assumed retailer control status",
+    align = "c"
+    ) %>%
+  kable_classic_2(c("hover")) %>%
+  column_spec(1:3, width = "40em")
+  
+```
+  
+There are `r scales::comma(sum(skips$SkipCodeCategory=="Unspecified"))` (`r scales::percent(sum(skips$SkipCodeCategory=="Unspecified")/nrow(skips), accuracy = 1)`) rows where the SKIP code category was not specified by the retailer, with a further `r scales::comma(sum(skips$SkipCodeCategory=="Unable to determine"))` (`r scales::percent(sum(skips$SkipCodeCategory=="Unable to determine")/nrow(skips), accuracy = 1)`) undetermined by the retailer and `r scales::comma(sum(skips$SkipCodeCategory=="Skip not yet available"))` (`r scales::percent(sum(skips$SkipCodeCategory=="Skip not yet available")/nrow(skips), accuracy = 1)`) not yet available to the retailer. However, not all of these were  devoid of data. Overall, `r scales::comma(sum(is.na(skips$SkipCode)))` (`r scales::percent(sum(is.na(skips$SkipCode))/nrow(skips), accuracy = 1)`) did not have a SKIP code and `r scales::comma(sum(is.na(skips$SkipCodeReason)))` (`r scales::percent(sum(is.na(skips$SkipCodeReason))/nrow(skips), accuracy = 1)`) did not have any SKIP code details. This  represents a significant share of the sample and therefore, as explored later in this paper, the final results of this study will depend on the treatment of the SKIPs missing data
+  
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skips %>%
+  count(SkipCodeCategory, SkipControl) %>%
+  mutate(SkipProportion = scales::percent(n / nrow(skips), accuracy = 0.1)) %>%
+  ggplot(aes(reorder(SkipCodeCategory, n), n)) +
+  geom_col(aes(fill = "MOSLR"), colour = "black") + 
+  geom_text(aes(label = SkipProportion, y = n + 200)) +
+  scale_y_continuous(labels = scales::comma) + 
+  MOSLR::scale_fill_MOSL() +
+  theme_bw() +
+  theme(legend.position = "none") + 
+  coord_flip() +
+  labs(
+    title = "Skip Code Categories",
+    subtitle = "Count of SKIP code categories specified by retailers",
+    caption = "Note: 'Unspecified' denotes SKIPs that retailers did not classify.",
+    x = "", y = "", fill = ""
+  )
+
+```
+
+We later refine these categories into more granular 'themes' after assessing the outputs of the text analysis of the SKIP codes and their descriptions. 
+  
+## Focus areas
+
+We have focused our analysis on: 
+  
+* Using the SKIP code reasons to (i) assess whether or not the SKIP code categorisations provided by the retailer are appropriate and (ii) identifying common SKIP themes
+* Using the SKIP themes to assess whether the categorisations are within or outside the retailer's control
+* Using read status to determine whether long unread meters are generally due to reasons within retailer control or outside (e.g. wholesaler-related issues)
+* Consider the net exposure to retailers from the combination of the 5% of total tasks allowance for performance failures and failures outside their control
+  
+# Analysis
+  
+## Assessment of categories
+  
+### Overview of SKIP descriptions
+  
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skip_length <- skips %>%
+  summarise(SkipLength = str_length(SkipCodeReason))
+
+skip_length_summary <- skip_length %>%
+  summarise(
+    N = n(), 
+    Missing = sum(is.na(SkipLength)),
+    Min = min(SkipLength, na.rm = TRUE),
+    Max = max(SkipLength, na.rm = TRUE),
+    Mean = mean(SkipLength, na.rm = TRUE),
+    Median = median(SkipLength, na.rm = TRUE),
+    Std = sd(SkipLength, na.rm = TRUE)
+  ) %>%
+  mutate(across(everything(), ~ scales::comma(., accuracy = 1)))
+
+```
+  
+Analysing free-text data fields and drawing relevant insight is often a challenge, as the data can either by highly complex or contain little to no usable information at all. In the case of the descriptions of the SKIP codes, many have low or no information, with `r scales::percent(mean(is.na(skips$SkipCodeReason)))` missing entirely (i.e. zero length) and a further `r scales::percent(mean(skip_length < 10, na.rm = TRUE))` being less than 10 characters long. 
+  
+Of the non-missing SKIP code descriptions, the character length has a mean value of `r skip_length_summary$Mean` and median value of `r skip_length_summary$Median`, which corresponds roughly to short sentences or phrase values. 
+  
+However, there is considerable variation, as shown by the relatively high standard deviation of `r skip_length_summary$Std` and the highest value of `r skip_length_summary$Max`. This shows that the additional information provided about SKIP codes can range from having no information whatsoever to complex and detailed paragraphs, with everything in between.
+  
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skip_length_summary %>%
+  kbl(
+    caption = "Statistics for the character length of SKIP code descriptions",
+    align = "c"
+    ) %>%
+  kable_classic_2(c("hover")) %>%
+  kable_styling(full_width = TRUE)
+
+```
+  
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skip_length %>%
+  ggplot() + 
+  geom_histogram(aes(SkipLength, fill = "MOSLR"), bins = 50, show.legend = FALSE) + 
+  theme_bw() + 
+  MOSLR::scale_fill_MOSL() + 
+  labs(
+    title = "Detail of SKIP Codes",
+    subtitle = "Histogram of character length of non-zero length SKIP code descriptions",
+    x = "", y = "", fill = ""
+  )
+
+```
+  
+The different distributions of character length by SKIP code category point to varying levels of complexity. In particular, SKIPs categories likely to be outside of retailer control (such as COVID vacancy and wholesaler issues) tend to have longer, more detailed descriptions. This could suggest that the underlying issues or problems of SKIPs outside retailer control are more complex to resolve than those within the retailer's control; or, that meter reading service providers are incentivised to provide additional details for these SKIPs for as of yet unknown reasons. 
+  
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skips %>%
+  group_by(SkipCodeCategory) %>%
+  mutate(MedianLength = median(SkipLength, na.rm = TRUE)) %>%
+  ungroup() %>%
+  ggplot() + 
+  geom_boxplot(aes(x = reorder(SkipCodeCategory, MedianLength), y = SkipLength, fill = "MOSLR"), outlier.alpha = 0.4) + 
+  coord_flip() + 
+  theme_bw() + 
+  theme(legend.position = "none") + 
+  MOSLR::scale_fill_MOSL() + 
+  labs(
+    title = "SKIP Code Category Complexity",
+    subtitle = "Boxplots of character lengths of SKIP code descriptions by category",
+    caption = "Note: Categories ordered by median character length",
+    x = "", y = "", fill = ""
+    )
+
+```
+  
+The distributions of SKIP length by control (i.e. according to our initial *a priori* assumptions of control) appear different, with SKIPs outside of retailer control generally longer. To confirm this is significant we first use a Poisson quantiles plot to observe whether our data follows a Poisson distribution. From the quantiles plot we see that our distribution has a heavy right tail, which means that Poisson distribution is not appropriate, and we therefore need to use a non-parametric test. The Kruskal Wallis test is first used, which confirms a statistically significant difference between SKIP length and inside/outside retailer control (p < 0.05); before using pairwise Wilcox test to confirm this is also the case for each category. 
+  
+### {.tabset .unlisted .unnumbered}
+  
+#### Density Plot {.unlisted .unnumbered}
+  
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skips %>%
+  filter(SkipControl != "Unknown") %>% 
+  ggplot() + 
+  geom_density(aes(x = log(SkipLength), fill = SkipControl), alpha = 0.5) + 
+  theme_bw() +
+  MOSLR::scale_fill_MOSL(colours = c("grey", "light blue", "orange")) + 
+  labs(
+    title = "Skip Length Distribution",
+    subtitle = "Density plot of SKIP length by SKIP control",
+    x = "SKIP Length", y = "Density", fill = "",
+    caption = "Note: Unknown retailer control has been excluded."
+  )
+
+```
+  
+#### Poisson quantiles plot {.unlisted .unnumbered}
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skiplengths <- skips$SkipLength[!is.na(skips$SkipLength)]
+
+poissonquantiles <-
+  qpois(
+    seq(
+      .Machine$double.eps,
+      1 - .Machine$double.eps,
+      length.out = length(skiplengths)
+    ),
+    mean(skiplengths)
+  )
+
+plot(
+  poissonquantiles,
+  sort(skiplengths),
+  pch = 20,
+  xlab = "Theoretical Quantiles",
+  ylab = "Observed quantiles"
+)
+
+abline(0, 1, lwd = 2, lty = 2, col = "red")
+
+```
+  
+#### Wilcox {.unlisted .unnumbered}
+  
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+pairwise.wilcox.test(skips$SkipLength, g = skips$SkipCodeCategory)$p.value %>% 
+  kbl(align = c("l", rep("c", 8))) %>%
+  kable_classic_2(c("hover")) %>%
+  kable_styling(full_width = TRUE)
+
+```
+  
+### {.unlisted .unnumbered}
+  
+The complexity and variability of SKIP code information could be further analysed by considering the volume of different words used and their length; however, this is beyond the scope of this analysis. Instead we next focus on a more simplistic word frequency analysis. 
+  
+### Common words
+  
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+other_stop_words <- c("cant", paste0("sk00", 1:9), paste0("s0", 0:9), "t", "2021", 1:25, "05", "tr018", "ep", "v", "1v", "na9")
+
+skip_words <- skips %>%
+  filter(!is.na(SkipCodeCategory)) %>%
+  select(
+    RetailerId, WholesalerId, Spid, LumStatus, SkipCodeReason, 
+    SkipCodeCategory, SkipControl
+    ) %>%
+  distinct(SkipCodeReason, .keep_all = TRUE) %>%
+  unnest_tokens(word, SkipCodeReason) %>%
+  group_by(word) %>%
+  filter(
+    n() > 5,
+    !word %in% c(stopwords::stopwords(), other_stop_words)
+    ) %>%
+  ungroup()
+
+skip_words %>%
+  filter(word != "meter") %>%
+  count(word) %>%
+  with(
+    wordcloud(
+      word, n, random.order = FALSE, rot.per = 0.25, colors = brewer.pal(8, "Dark2")
+    )
+  )
+
+```
+  
+Just from the word cloud above it is clear that the issue of "access" is raised frequently in SKIP descriptions and is clearly a major issue. To explore this further, we note first that there are many words that appear under both categories (e.g. meter, asset, access). We take that into account and apply inverse document frequency (more details [here](https://en.wikipedia.org/wiki/Tf%E2%80%93idf)) to remove words commonly appearing in both categories. 
+
+In each category there are mostly words we would expect to see. For example, under wholesaler asset there is "damaged", "buried", "missing", etc. and under wholesaler location there are words such as "locate", "found", "address", etc. Further, even though the frequencies are low, we see indications that at least some of the unspecified, undetermined and unavailable SKIP categories have relevant information and could potentially be meaningfully categorised. 
+  
+```{r, fig.height=10, message=FALSE,  warning=FALSE, error=FALSE}
+
+skip_words %>%
+  count(SkipCodeCategory, word, SkipControl, sort = TRUE) %>%
+  bind_tf_idf(word, SkipCodeCategory, n) %>%
+  mutate(word = fct_reorder(word, tf_idf)) %>%
+  group_by(SkipCodeCategory) %>%
+  top_n(15, tf_idf) %>%
+  ungroup() %>%
+  ggplot() +
+  geom_col(aes(reorder_within(word, n, SkipCodeCategory), n, fill = "MOSLR")) +
+  scale_x_reordered() +
+  coord_flip() +
+  facet_wrap(~SkipCodeCategory, scales = "free", ncol = 3) +
+  theme_bw() +
+  theme(legend.position = "none") + 
+  labs(
+    title = "SKIP Code Key Words", 
+    subtitle = "Frequency of key words within SKIP codes commentary",
+    caption = "Note: Inverse document frequency has been used to remove words occuring in other categories. \nOnly the top 15 words for each category have been shown.", 
+    x = "",  y = "", fill = ""
+    ) + 
+  MOSLR::scale_fill_MOSL()
+
+```
+  
+Based on the above, the commonly occurring words in the detailed explanations suggest that the manual categorisation by retailers of their SKIP code data is appropriate. However, these high-level categorisations are insufficient on their own to be able to determine which SKIPs were outside or within retailer control. To address this, we attempt to identify more granular themes using the SKIP codes and descriptions. 
+  
+### Common themes
+  
+To explore whether there are commonly occurring themes within each SKIP category, we look at the word relationships and co-occurrence of words using a word network graph for each high-level category. 
+  
+```{r, message=FALSE,  warning=FALSE, error=FALSE}
+
+skip_bigrams <- skips %>%
+  group_by(SkipCodeCategory) %>%
+  unnest_tokens(bigram, SkipCodeReason, token = "ngrams", n = 2) %>%
+  ungroup() %>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  filter(
+    !is.na(word1),
+    !word1 %in% other_stop_words,
+    !word2 %in% other_stop_words
+  ) %>% 
+  count(SkipCodeCategory, word1, word2, sort = TRUE) %>%
+  filter(n > 15)
+
+skip_ggraph <- function(SKIP_CATEGORY) {
+
+  skip_graph <- skip_bigrams %>%
+    filter(SkipCodeCategory == SKIP_CATEGORY) %>% 
+    select(-SkipCodeCategory) %>%
+    graph_from_data_frame() 
+  
+  ggplot <- ggraph(skip_graph, layout = "fr") +
+    geom_edge_link(show.legend = FALSE, end_cap = circle(.01, 'inches'), color = "grey") +
+    geom_node_point(color = "#425563", size = 2) +
+    geom_node_text(aes(label = name), vjust = 1, hjust = 1, repel = TRUE, size = 5) + 
+    ggtitle(SKIP_CATEGORY)
+  
+  return(ggplot)
+  
+}
+
+plots <- lapply(unique(skips$SkipCodeCategory), skip_ggraph)
+
+```
+  
+### {.tabset .unlisted .unnumbered}
+  
+```{r, fig.width=15, fig.height=15, message=FALSE,  warning=FALSE, error=FALSE, results="asis"}
+
+for (ggplot in plots) {
+  
+  cat("  \n####", ggplot$label$title, " {.unlisted .unnumbered}", "\n")
+  plot(ggplot)
+  cat("  \n")
+  
+}
+
+```
+  
+### {.unlisted .unnumbered}
+  
+From these network graphs we can identify common themes and issues. We have summarised these issues in the table below and indicated with an asterisk where we believe the issue to be outside retailer control.
+  
+```{r, message=FALSE,  warning=FALSE, error=FALSE}
+
+asset_themes <-
+  c(
+    "Jammed lid*",
+    "Water under glass/Flooded meter chamber*",
+    "No access to the meter*",
+    "Damaged/faulty asset*",
+    "Missing/buried/blocked meter*",
+    "Meter decommissioned*",
+    rep("", 1)
+  )
+
+location_themes <-
+  c(
+    "Unsafe location*",
+    "Not enough information provided*",
+    "Unable to locate meter*",
+    "Property Demolished*" ,
+    rep("", 3)
+  )
+
+vacant_themes <- c("Vacant property", "Covid Vacant", rep("", 5))
+
+other_themes <-
+  c("Scheduling issue",
+    "Spike in consumption",
+    "Internal validation failed",
+    "Never been read",
+    "Customer action required",
+    "Unspecified access issues",
+    "Third party service provider issue"
+  )
+
+common_themes <-
+  tibble(
+    Asset = asset_themes,
+    Location = location_themes,
+    Vacant = vacant_themes,
+    Other = other_themes
+  )
+
+common_themes %>% 
+  kable(
+    col.names = c(
+      "Wholesaler/Retailer Asset", "Wholesaler/Retailer Location",
+      "Vacancy", "Other"
+      )
+    ) %>%
+  kable_classic_2(c("hover", "striped")) %>%
+  scroll_box(width = "100%") %>%
+  footnote(general = "Astericks denotes themes assumed to be outside retailer control")
+
+```
+
+### {.tabset .unlisted .unnumbered}
+  
+```{r, fig.height=8, fig.width=10, message=FALSE,  warning=FALSE, error=FALSE}
+
+outside_control <- c(
+  "Jammed lid", "Water under glass/Flooded meter chamber", "Refused access", "Inaccessible meter",
+  "Damaged/faulty asset", "Missing/buried meter", "Blocked meter", "Decomissioned meter", 
+  "Unsafe location", "Insufficient location info.", "Unable to locate meter", "Property demolished",
+  "Other location issue"
+ )
+
+skip_themes <- skips  %>%
+  distinct(
+    Spid, MeterSerialNumber, InitialMeterReadDate, 
+    InitiatingEventDate, SkipCodeReason, .keep_all = TRUE
+    ) %>%
+  mutate(
+    SkipCodeTheme = case_when(
+      str_detect(SkipCodeReason, "(lid)|(cover)") & 
+        !str_detect(SkipCodeReason, "validation") |
+        str_detect(SkipCode, "Lid Jammed")
+      ~ "Jammed lid",
+      str_detect(SkipCodeReason, "condensation") | 
+        str_detect(SkipCodeReason, "mist") | 
+        !str_detect(SkipCodeReason, "^((?!water).)*$|^((?!under).)*$|^((?!glass).)*$") | 
+        str_detect(SkipCodeReason, "(flooded)|(waterlogged)|(water inside)")
+      ~ "Water under glass/Flooded meter chamber",
+      !str_detect(SkipCodeReason, "^((?!no).)*$|^((?!access).)*$") | 
+        !str_detect(SkipCodeReason, "^((?!refused).)*$|^((?!access).)*$") |
+        !str_detect(SkipCodeReason, "^((?!access).)*$|^((?!refused).)*$") |
+        !str_detect(SkipCodeReason, "^((?!access).)*$|^((?!restricted).)*$") |
+        !str_detect(SkipCodeReason, "^((?!refused).)*$|^((?!entry).)*$") |
+        !str_detect(SkipCodeReason, "^((?!denied).)*$|^((?!access).)*$") |
+        str_detect(SkipCodeReason, "(restricted)|(refused)|(denied)") |
+        SkipCode %in% c("RA", "Refused Access") |
+        str_detect(SkipCode, "No Access")
+      ~ "Refused access",
+      str_detect(SkipCodeReason, "(inaccessible)|(locked)") |
+        !str_detect(SkipCodeReason, "^((?!vehicle).)*$|^((?!pit).)*$") |
+        !str_detect(SkipCodeReason, "^((?!vehicle).)*$|^((?!meter).)*$") |
+        !str_detect(SkipCodeReason, "^((?!vehicle).)*$|^((?!over).)*$") |
+        !str_detect(SkipCodeReason, "^((?!car).)*$|^((?!meter).)*$") |
+        !str_detect(SkipCodeReason, "^((?!key).)*$|^((?!needed).)*$")
+      ~ "Inaccessible meter",
+      str_detect(SkipCodeReason, "(fault)|(damage)|(broke)") |
+        str_detect(SkipCode, "Damaged") |
+        !str_detect(SkipCodeReason, "^((?!debris).)*$|^((?!in).)*$|^((?!chamber).)*$") |
+        str_detect(SkipCodeReason, "(low visibility)|(pit collapsed)|(mud)|(dirty)|(unable to read)")
+      ~ "Damaged/faulty asset",
+      str_detect(SkipCodeReason, "(missing)|(buried)") |
+        str_detect(SkipCode, "AMR Failed")
+      ~ "Missing/buried meter",
+      str_detect(SkipCodeReason, "(blocked)") | 
+        str_detect(SkipCode, "Blocked Access")
+      ~ "Blocked meter",
+      str_detect(SkipCodeReason, "(removed)|(decommis)|(exchanged)|(deregistered)|(inactive)|(replaced)|(replacement)")
+      ~ "Decomissioned meter",
+      str_detect(SkipCodeReason, "(unsafe)|(hazard)|(health)|(safety)|(obstruction)|(overgrown)") | 
+        SkipCode %in% c("AHAS", "Safety Hazard")
+      ~ "Unsafe location",
+      str_detect(SkipCodeReason, "(insufficient)|(sufficient)|(details)|(description)|(property address)") | 
+        !str_detect(SkipCodeReason, "^((?!more).)*$|^((?!information).)*$") |
+        !str_detect(SkipCodeReason, "^((?!incorrect).)*$|^((?!information).)*$") |
+        !str_detect(SkipCodeReason, "^((?!inaccurate).)*$|^((?!information).)*$") |
+        !str_detect(SkipCodeReason, "^((?!never).)*$|^((?!been).)*$") |
+        str_detect(SkipCode, "Insufficient")
+      ~ "Insufficient location info.",
+      !str_detect(SkipCodeReason, "^((?!no).)*$|^((?!found).)*$") |
+        !str_detect(SkipCodeReason, "^((?!can).)*$|^((?!find).)*$") |
+        !str_detect(SkipCodeReason, "^((?!unable).)*$|^((?!find).)*$") |
+        !str_detect(SkipCodeReason, "^((?!unable).)*$|^((?!loc).)*$") |
+        !str_detect(SkipCodeReason, "^((?!can).)*$|^((?!loc).)*$") |
+        str_detect(SkipCodeReason, "(gps)") |
+        str_detect(SkipCode, "Meter Missing")
+      ~ "Unable to locate meter",
+      str_detect(SkipCodeReason, "(customer)|(cust)|(card)|(key)|(office)")
+      ~ "Customer action required",
+      str_detect(SkipCodeReason, "demolish") |
+        str_detect(SkipCode, "(Demolished)|(Premises Empty)")
+      ~ "Property demolished",
+      str_detect(SkipCodeReason, "locat")
+      ~ "Other location issue",
+      SkipCodeCategory == "Vacant" | str_detect(SkipCodeReason, "vacant") 
+      ~ "Vacant",
+      str_detect(SkipCodeReason, "(covid)|(corona)|(cv)|(virus)|(convid)|(cv19)") 
+      ~ "Covid Vacant",
+      !str_detect(SkipCodeReason, "^((?!missed).)*$|^((?!reading).)*$") |
+        !str_detect(SkipCodeReason, "^((?!no).)*$|^((?!attempt).)*$") |
+        str_detect(SkipCodeReason, "(3rd party)|(third party)") |
+        !str_detect(SkipCodeReason, "^((?!wrong).)*$|^((?!read).)*$") |
+        !str_detect(SkipCodeReason, "^((?!wrong).)*$|^((?!meter).)*$") |
+        str_detect(SkipCodeReason, "(not visited)|(process failure)|(failed to submit)|(reading sent after failure)|(not received)|(not put into cmos)|(no visit)|(not the retailer)")
+      ~ "Third party issue",
+      str_detect(SkipCodeReason, "(scheduling)|(mismatch)|(schedule)") |
+        !str_detect(SkipCodeReason, "^((?!incorrect).)*$|^((?!read).)*$") |
+        !str_detect(SkipCodeReason, "^((?!late).)*$|^((?!submission).)*$") |
+        !str_detect(SkipCodeReason, "^((?!late).)*$|^((?!read).)*$") |
+        str_detect(SkipCode, "(Scheduling)|(failed upload)")
+      ~ "Scheduling issue",
+      !str_detect(SkipCodeReason, "^((?!fail).)*$|^((?!validation).)*$") |
+        str_detect(SkipCodeReason, "new meter serial")
+      ~ "Internal validation failed",
+      (is.na(SkipCodeReason) & is.na(SkipCode))
+      ~ "Missing data",
+      str_detect(SkipCodeReason, "access")
+      ~ "Unspecified access issue",
+      TRUE ~ "Uncategorised"
+      ),
+    SkipControlAdj = case_when(
+      SkipCodeTheme %in% outside_control ~ "Outside retailer control",
+      SkipCodeTheme %in% c("Missing data", "Other reason") ~ "Unknown",
+      TRUE ~ "Within retailer control"
+      ),
+    SkipControlAdj = factor(
+      SkipControlAdj, 
+      levels = c("Outside retailer control", "Within retailer control", "Unknown")
+      )
+  )
+
+```
+
+We have then used text analysis of the SKIP codes and descriptions to map each SKIP into the closest matching theme. We found that `r scales::comma(sum(skip_themes$SkipCodeTheme=="Missing data"))` (`r scales::percent(sum(skip_themes$SkipCodeTheme=="Missing data") / nrow(skip_themes), accuracy = 1)`) did not have any data and therefore could not be matched; whilst a further `r scales::comma(sum(skip_themes$SkipCodeTheme=="Uncategorised"))` (`r scales::percent(sum(skip_themes$SkipCodeTheme=="Uncategorised") / nrow(skip_themes), accuracy = 1)`) had some information but could be not reliably categorised with the data available. 
+
+Of those that could be categorised, "Refused access" with `r scales::comma(sum(skip_themes$SkipCodeTheme=="Refused access"))` (`r scales::percent(sum(skip_themes$SkipCodeTheme=="Refused access")/nrow(skip_themes), accuracy = 1)`) was the most common by a large margin, whereas the other SKIPs were relatively evenly distributed amongst other themes. 
+
+Of the high-level retailer categories, we found that a small proportion of the unspecified SKIPs could be matched to a theme, approximately a third of undetermined SKIPs could be matched, whilst all of the unavailable SKIPs could be matched. 
+
+There were varying levels of complexity within each categories, with some dominated by a single theme (e.g. refusal of access in retailer access), whilst others were more nuanced (e.g. broad mixture of flooded chambers, demolished property, missing meters, jammed lids, damaged or decomissioned meters within the wholesaler asset category). Our interpretation of this is that certain types of SKIPs require more detailed or technical information to be resolved, particularly where wholesaler action will be required; unlike issues that can be resolved more directly, by, for example, contacting the customer.
+  
+#### Overview of themes {.unlisted .unnumbered}
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skip_themes %>%
+  count(SkipCodeTheme) %>%
+  mutate(Proportion = scales::percent(n / nrow(skip_themes), accuracy = 0.1)) %>%
+  ggplot(aes(x = reorder(SkipCodeTheme, n), y = n)) + 
+  geom_col(aes(fill = "MOSLR")) + 
+  geom_text(aes(label = Proportion, y = n + 150)) +
+  coord_flip() + 
+  scale_y_continuous(labels = scales::comma) +
+  MOSLR::scale_fill_MOSL() + 
+  theme_bw() +
+  theme(legend.position = "none") + 
+  labs(
+    title = "SKIP Code Themes",
+    subtitle = "Breakdown of themes based on text analysis of SKIP descriptions",
+    x = "", y = "", fill = ""
+  )
+
+```
+  
+Having matched as many of the SKIPs as possible to a theme, and assigned retailer control based on the theme, we can now attempt to determine the extent of control retailers have over performance failures. 
+  
+#### Categories vs. control {.unlisted .unnumbered}
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skip_themes %>%
+  count(SkipCodeCategory, SkipControlAdj) %>%
+  mutate(SkipProportion = scales::percent(n / nrow(skips), accuracy = 0.1)) %>%
+  ggplot(aes(reorder(SkipCodeCategory, n), n)) +
+  geom_col(aes(fill = SkipControlAdj), col = "black") + 
+  scale_y_continuous(labels = scales::comma) + 
+  MOSLR::scale_fill_MOSL(colours = c("grey", "light blue", "orange")) +
+  theme_bw() +
+  theme(legend.position = "top") + 
+  coord_flip() +
+  labs(
+    title = "SKIP Code Categories and Control",
+    subtitle = "Count of SKIP code categories broken down by retailer control",
+    x = "", y = "", fill = ""
+  )
+
+```
+  
+#### Themes heatmap {.unlisted .unnumbered}
+
+```{r, fig.height=10, fig.width=12, message=FALSE, warning=FALSE, error=FALSE}
+
+skip_categories <- skip_themes %>% 
+  filter(SkipCodeTheme != "Missing data") %>%
+  count(SkipCodeCategory, SkipCodeTheme, .drop = TRUE) %>%
+  complete(SkipCodeCategory, SkipCodeTheme) %>%
+  group_by(SkipCodeCategory) %>%
+  mutate(
+    ProportionNumeric = if_else(is.na(n), 0, n / sum(n, na.rm = TRUE)),
+    Proportion = scales::percent(ProportionNumeric, accuracy = 0.1)
+    ) 
+
+skip_categories %>%
+  ggplot(
+    aes(
+      str_wrap(SkipCodeTheme, width = 15), 
+      str_wrap(SkipCodeCategory, width = 15)
+      )
+    ) + 
+  geom_tile(aes(fill = ProportionNumeric)) + 
+  coord_flip() + 
+  theme_minimal() +
+  labs(
+    title ="SKIP Categories and Themes",
+    subtitle = "Heatmap of SKIP code themes and categories based on text and theme analysis of SKIP code descriptions",
+    caption = "Note: Percentages show adjusted SKIP codes as a percentage of total category",
+    x = "", y = "", fill = ""
+    ) + 
+  theme(legend.position = "top") +
+  geom_text(aes(label = Proportion), col = "black") +
+  scale_fill_distiller(palette = "Blues", trans = "reverse")
+
+```  
+  
+#### Table {.unlisted .unnumbered}
+  
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skip_categories %>%
+  select(-ProportionNumeric) %>% 
+  datatable(
+    extensions = 'Buttons',
+    options = list(
+      dom = 'Blfrtip',
+      buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+      lengthMenu = list(c(10, 25, 50, -1), c(10, 25, 50, "All"))
+    ),
+    colnames = c(
+      "SKIP category", "SKIP theme",
+      "Count", "Share of total"
+    )
+  )
+
+```
+  
+### {.unlisted .unnumbered}
+  
+## Control of performance failures 
+
+### Scenario overview {.tabset}
+
+```{r, message=FALSE,  warning=FALSE, error=FALSE}
+
+skips_combined <- skips %>%
+  left_join(
+    select(
+      skip_themes, Spid, MeterSerialNumber, InitialMeterReadDate, 
+      SkipCode, SkipCodeReason, SkipControlAdj, SkipCodeTheme
+      ),
+    by = c(
+      "Spid", "MeterSerialNumber", "InitialMeterReadDate", 
+      "SkipCode", "SkipCodeReason"
+      )
+    ) %>%
+  select(
+    Spid, MeterSerialNumber, InitialMeterReadDate, RetailerIdAnon, 
+    RetailerType, SkipCodeTheme, SkipControlAdj, LumStatus
+    )
+
+unmatched_skips <- skips_combined %>% 
+  filter(SkipCodeTheme %in% c("Missing data", "Uncategorised")) %>% 
+  summarise(
+    UnmatchedCount = n(),
+    UnmatchedProp = scales::percent(UnmatchedCount / nrow(skips_combined), accuracy = 0.1)
+    )
+
+scenario_labels = c(
+  "Include as within control", "Include as outside control", 
+  "Include as unknown control", "Exclude from sample", 
+  "Weighted reassignment", "Unweighted reassignment", 
+  "Probabilistic reassignment"
+  )
+
+
+# Basic scenarios
+
+include_within <- skips_combined %>% 
+  mutate(
+    SkipControlAdj = if_else(
+      SkipCodeTheme %in% c("Missing data", "Uncategorised"),
+      "Inside retailer control",
+      as.character(SkipControlAdj)
+      ),
+    Scenario = scenario_labels[1]
+    )
+
+include_outside <- skips_combined %>% 
+  mutate(
+    SkipControlAdj = if_else(
+      SkipCodeTheme %in% c("Missing data", "Uncategorised"),
+      "Outside retailer control",
+      as.character(SkipControlAdj)
+      ), 
+    Scenario = scenario_labels[2]
+    )
+
+include_unknown <- skips_combined %>% 
+  mutate(
+    SkipControlAdj = if_else(
+      SkipCodeTheme %in% c("Missing data", "Uncategorised"),
+      "Unknown",
+      as.character(SkipControlAdj)
+      ),
+    Scenario = scenario_labels[3]
+    )
+
+exclude <- skips_combined %>% 
+  filter(!SkipCodeTheme %in% c("Missing data", "Uncategorised")) %>%
+  mutate(Scenario = scenario_labels[4])
+
+
+# Weighted reassignment scenario
+
+props_wt <- skips_combined %>%
+  filter(!SkipCodeTheme %in% c("Missing data", "Uncategorised")) %>%
+  mutate(
+    OutControl = if_else(SkipControlAdj == "Outside retailer control", 1, 0)
+    ) %>%
+  group_by(SkipCodeTheme) %>%
+  summarise(
+    Props = n() / nrow(skips_combined),
+    MeanControl = mean(OutControl)
+    ) %>% 
+  drop_na()
+
+reassign_wt <- data.frame(
+  OutsideRetailerControl = weighted.mean(props_wt$MeanControl, w = props_wt$Props),
+  Scenario = scenario_labels[5]
+)
+
+
+# Unweighted reassignment scenario
+
+missing_reason_add <- skips_combined %>% 
+  filter(SkipCodeTheme %in% c("Missing data", "Uncategorised")) %>% 
+  summarise(n = round(n()  / (NROW(unique(skips_combined$SkipCodeTheme)) - 1)))
+
+props_unwt <- skips_combined %>%
+  filter(!SkipCodeTheme %in% c("Missing data", "Uncategorised")) %>% 
+  count(SkipCodeTheme, SkipControlAdj) %>%
+  mutate(
+    n = n + missing_reason_add$n,
+    OutControl = if_else(SkipControlAdj == "Outside retailer control", 1, 0),
+    ) %>%
+  drop_na() %>% 
+  summarise(
+    Scenario = scenario_labels[6],
+    OutsideRetailerControl = weighted.mean(OutControl, w = n)
+  )
+
+## Model summary
+
+skips_themes_modelled_summary <- 
+  readRDS(paste0(getwd(), "/data/model_summary.RDS")) %>%    
+  mutate(Scenario = scenario_labels[7])
+
+# Combine all the scenario outcomes
+
+scenarios_summary <- rbind(include_within, include_outside, include_unknown, exclude) %>%
+  mutate(
+    OutsideRetailerControl = if_else(
+      SkipControlAdj == "Outside retailer control", 1, 0
+      ),
+    Scenario = factor(
+      Scenario, 
+      levels = scenario_labels 
+      )
+    ) %>%
+  group_by(Scenario) %>%
+  summarise(OutsideRetailerControl = mean(OutsideRetailerControl, na.rm = TRUE)) %>%
+  rbind(reassign_wt, props_unwt, skips_themes_modelled_summary)
+
+```
+  
+The final share of performance failures outside the control of retailers depends heavily on the treatment of the "unmatched" SKIP codes either missing usable information or the information was insufficient to enable mapping to a theme. This translates to a significant `r scales::comma(unmatched_skips$UnmatchedCount)` (`r unmatched_skips$UnmatchedProp`) of the performance charges in the sample and is therefore non-trivial. It is also not straightforward to resolve as we do not know whether it is non-random that certain SKIPs are missing the required information. For example, these SKIPs could correspond to unattempted or unsubmitted reads. 
+
+We have identified the following options for resolving the unmatched SKIP codes:
+
+1. Include and assume within retailer control
+1. Include and assume outside retailer control
+1. Include and categorise control as “unknown”
+1. Exclude from the sample 
+1. Weighted re-assignment to other themes and inherit control
+1. Unweighted re-assignment to other themes and inherit control
+1. Probabilistic re-assignment of control using classification model
+
+The classification model used to re-assign control was a gradient boosted decision tree model (XGBoost). The model was selected against other models (including logistic regression and Random Forest models) using cross-validation, and evaluated on the adjusted classification accuracy (Cohen's kappa statistic). 
+
+Note that some of the scenarios above are equivalent or very similar and have been included only for demonstration purposes and for the sake of completeness. The merits of each scenario are discussed below. 
+
+#### Graph {.unlisted .unnumbered}
+
+```{r, message=FALSE,  warning=FALSE, error=FALSE}
+  
+# Plot the scenario outcomes as a bar chart
+
+scenarios_summary %>%
+  ggplot(aes(x = Scenario, y = OutsideRetailerControl)) + 
+  geom_col(aes(fill = "MOSLR"), colour = "black") + 
+  geom_text(aes(
+    label = scales::percent(OutsideRetailerControl, accuracy = 0.1),
+    y = OutsideRetailerControl + 0.05
+    )) + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) + 
+  scale_y_continuous(labels = scales::percent) + 
+  theme_bw() + 
+  theme(legend.position = "none") +
+  MOSLR::scale_fill_MOSL() + 
+  labs(
+    title = "Scenario Outcomes for Retailer Control of Performance Failures",
+    subtitle = "Breakdown of performance failures outside retailer control by treatment\nof unmatched SKIP codes",
+    x = "Treatment scenarios for unmatched SKIP codes", y = "Performance failures outside retailer control", fill = ""
+  )
+
+```
+
+#### Table {.unlisted .unnumbered}
+
+```{r, message=FALSE,  warning=FALSE, error=FALSE}
+
+scenarios_summary %>%
+  mutate(
+    OutsideRetailerControl = 
+      scales::percent(OutsideRetailerControl, accuracy = 0.01)
+    ) %>%
+  kbl(col.names = c("Scenario", "Outside retailer control"), align = "lr") %>%
+  kable_classic_2(c("striped", "hover"))
+
+```
+  
+### {.unlisted .unnumbered}
+  
+The lowest scenario outcome of retailer control (`r scales::percent(min(scenarios_summary$OutsideRetailerControl), accuracy = 0.1)`) is given by either including the unmatched SKIPs as "within retailer control" or by including them but recategorising as "unknown control". In the highest scenario outcome (`r scales::percent(max(scenarios_summary$OutsideRetailerControl), accuracy = 0.1)`) the unmatched SKIPs would have to be included and changed to "outside retailer control".
+
+Our assessment of each scenario is as follows:
+
+* **Include as within control and re-categorise to unknown**: These two scenarios are equivalent but, whilst being the most conservative, they both suffer from the same issue that we do not know the control distribution of unmatched SKIPs.
+* **Include as outside control**: As above, we do not know the control distribution but consider it likely that unmatched SKIPs are non-randomly distributed towards "within" retailer control due to the lack of detail provided in the SKIPs versus the high level of detail in SKIPs that are "outside" retailer control.
+* **Exclude from sample and weighted/unweighted reassignment**: Excluding poor quality data from a sample is often the right approach, however in this case it is likely to introduce significant bias as we do not know if unmatched SKIPs are non-randomly distributed; and, instead, zero-length SKIP descriptions could be a key indicator of a SKIP being within the retailer's control (or vice versa). 
+* **Probabilistic re-assignment**: This scenario has the benefit of retaining as much data as possible and allows us to predict the control of SKIPs. It is based on the known characteristics of the meters, premises and retailers in the sample; and is therefore the most appealing option. The model is, however, limited by the size of the sample and uneven data quality issues. In particular, certain retailers have a disproportionately large share of unmatched SKIPs. The model could be improved by obtaining more data and scrutinising unmatched SKIPs in more detail with retailers to verify the predicted outcomes.
+
+The observed range of performance failures outside retailer control is lower than the 80-100% range suggested to justify entirely suspending all performance charges; however, the results do suggest that a discount, between `r scales::percent(min(scenarios_summary$OutsideRetailerControl, na.rm = TRUE), accuracy = 1)`-`r scales::percent(scenarios_summary$OutsideRetailerControl[4], accuracy = 1)`, or increased allowance for performance failures, could be appropriate.
+
+We therefore recommend relying on the outcomes predicted by probabilistic re-assignment, which suggests that `r scales::percent(scenarios_summary$OutsideRetailerControl[7], accuracy = 0.1)` of performance failures were outside retailer control. This suggests a more conservative range of performance failures  outside retailer control between `r scales::percent(min(scenarios_summary$OutsideRetailerControl), accuracy = 1)`-`r scales::percent(scenarios_summary$OutsideRetailerControl[7], accuracy = 1)`.
+  
+### Individual retailer performance {.tabset}
+  
+The individual outcomes for each anonymised retailer is shown below for all scenarios. There is considerable variability among retailers, with some little impacted by the different scenarios and others with large swings in overall control of performance failures. In almost all cases, the scenario that includes unmatched SKIPs as "within" retailer control gives the lowest share of failures outside retailer control; however, there are some cases where the probabilistic reassignment has given a lower overall level. Note that this was only possible where the unmatched SKIPs were more than half the retailer's sample of SKIPs. 
+
+We also find a positive correlation, albeit weak, between MPS performance and percentage of failures outside retailer control. One interpretation of this is that retailers with good performance are more likely to have performance failures outside their control, whereas poor performers would have a more random or equal share of failures outside their control. We did not see any evidence to suggest that poor overall performers had higher level of failures outside their control.
+
+#### Retailer scenario outcomes {.unlisted .unnumbered}
+
+```{r, fig.height=8, fig.width=10, message=FALSE,  warning=FALSE, error=FALSE}
+
+skips_modelled_tps <- readRDS(paste0(getwd(), "/data/model_summary_tps.RDS")) %>%
+  mutate(Scenario = scenario_labels[7])
+
+scenarios_summary_tps <- rbind(include_within, include_outside, exclude) %>%
+  mutate(
+    OutsideRetailerControl = if_else(
+      SkipControlAdj == "Outside retailer control", 1, 0
+      )
+    ) %>%
+  group_by(RetailerIdAnon, RetailerType, Scenario) %>%
+  summarise(
+    OutsideRetailerControl = mean(OutsideRetailerControl, na.rm = TRUE),
+    TotalSkips = n()
+    ) %>% 
+  rbind(skips_modelled_tps) %>% 
+  mutate(Scenario = factor(Scenario, levels = scenario_labels))
+
+scenarios_summary_tps %>% 
+  filter(TotalSkips > 5) %>% 
+  group_by(RetailerIdAnon) %>% 
+  mutate(
+    MinY = min(OutsideRetailerControl, na.rm = TRUE),
+    MaxY = max(OutsideRetailerControl, na.rm = TRUE)
+    ) %>% 
+  ungroup() %>% 
+  mutate(RetailerIdAnon = fct_reorder(RetailerIdAnon, OutsideRetailerControl, min)) %>%
+  ggplot() + 
+  geom_segment(aes(x = RetailerIdAnon, xend = RetailerIdAnon, y = MinY, yend = MaxY), colour = MOSLR::MOSL_colours("orange"), size = 0.6) +
+  geom_point(aes(x = RetailerIdAnon, y = OutsideRetailerControl, colour = Scenario), size = 4, alpha = 0.7) +
+  scale_y_continuous(labels = scales::percent) +
+  coord_flip() + 
+  MOSLR::scale_colour_MOSL() +
+  theme_bw() + 
+  theme(legend.position = "top") + 
+  labs(
+    title = "Retailer Performance Failure Control Scenarios",
+    subtitle = "Percentage of performance failures that are outside retailer control by scenario", 
+    caption = "Note: Retailer names have been anonymised",
+    x = "", y = "Performance failures outside retailer control", fill = "", colour = ""
+    ) 
+
+
+```
+  
+#### Performance vs. Control {.unlisted .unnumbered}
+
+```{r, fig.width=10, message=FALSE,  warning=FALSE, error=FALSE}
+
+skips_modelled_tps %>%
+  filter(TotalSkips > 5) %>% 
+  ggplot(aes(x = Performance, y = OutsideRetailerControl)) + 
+  geom_point(aes(colour = RetailerType), size = 3.5) + 
+  geom_smooth(method = "lm", col = "red", lty = "dashed", alpha = 0.1) + 
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) + 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) + 
+  theme_bw() + 
+  MOSLR::scale_colour_MOSL(reverse = TRUE) +
+  labs(
+    title = "Failure Outside Retailer Control with Total Failure by Retailer Type",
+    subtitle = "Percentage of performance failures outside retailer control versus total count of failures and retailer type",
+
+    y = "Failures outside retailer control", x = "MPS Performance",
+    colour = ""
+  )
+
+```
+  
+### {.unlisted .unnumbered}
+  
+## Meter read status {.tabset}
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skips_lum <- skips_combined %>%
+  distinct(Spid, MeterSerialNumber, InitialMeterReadDate, .keep_all = TRUE) %>%
+  filter(
+    !is.na(LumStatus), LumStatus != "NULL",
+    !(SkipCodeTheme == "Missing data" & SkipControlAdj == "Outside retailer control")
+    ) %>%
+  count(SkipCodeTheme, SkipControlAdj, LumStatus) %>%
+  group_by(SkipCodeTheme) %>%
+  mutate(Proportion = n / sum(n)) %>%
+  ungroup() %>%
+  filter(LumStatus == "Read") %>%
+  mutate(
+    SkipControlAdj = if_else(
+      SkipCodeTheme == "Missing data", "Missing data", as.character(SkipControlAdj)
+      ),
+    SkipControlAdj = factor(
+      SkipControlAdj, 
+      levels = c("Outside retailer control", "Within retailer control", "Missing data")
+      )
+    ) 
+
+skips_read_missing <- skips_lum %>% 
+  filter(SkipCodeTheme == "Missing data") %>% 
+  mutate(n = scales::comma(n), Proportion = scales::percent(Proportion, accuracy = 0.1))
+
+skips_read_refused <- skips_lum %>% 
+  filter(SkipCodeTheme == "Refused access") %>% 
+  mutate(n = scales::comma(n), Proportion = scales::percent(Proportion, accuracy = 0.1))
+
+```
+  
+Our next analysis section focuses on the relationship of the meter read status with SKIP code categorisation and our SKIP code themes. 
+
+We found that meters that have SKIP codes that are within retailer control are more likely to be subsequently read than those meters with issues outside retailer control; and conversely, meters that have SKIPs outside the retailer control are more likely to become unread and remain unread. 
+
+In addition, when looking at the read status across each of the SKIP themes identified in previous sections, we found that `r skips_read_missing$n` (`r skips_read_missing$Proportion`) meters with missing SKIP data (highlighted in orange) were subsequently read. This could suggest that those SKIPs missing data are more likely to be within the control of the retailer than outside. This provides support for the scenarios for dealing with unmatched SKIPs that tend towards assigning them to within the control of the retailer (i.e. both the scenario that includes unmatched SKIPs as within retailer control and the probablistic reassignment scenario).
+
+Lastly, when comparing the percentage of meters subsequently read and the total count of SKIPs by theme, we notice the main outlier, or most prominent issue, is refused access. This was the most commonly occurring reason for SKIPs and performance failures (`r skips_read_refused$n`) and only `r skips_read_refused$Proportion` of those meters are subsequently read. We would recommend that this issue is reviewed as a priority to better understand the causes and potential resolutions, particularly if this is due to a widespread lack of customer engagement with the market. 
+
+### Overall read status {.unlisted .unnumbered}
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+skips_combined %>%
+  distinct(Spid, MeterSerialNumber, InitialMeterReadDate, .keep_all = TRUE) %>%
+  filter(!is.na(LumStatus), LumStatus != "NULL") %>%
+  count(LumStatus, SkipControlAdj) %>%
+  group_by(SkipControlAdj) %>%
+  mutate(Proportion = n / sum(n)) %>%
+  ungroup() %>%
+  ggplot(aes(LumStatus, Proportion)) +
+  geom_col(aes(fill = SkipControlAdj), colour = "black", position = "dodge")  +
+  geom_text(aes(
+    label = scales::percent(Proportion, accuracy = 0.1), 
+    group = SkipControlAdj,
+    y = Proportion + 0.05
+      ),
+    position = position_dodge(0.9)
+    ) +
+  scale_y_continuous(labels = scales::percent) +
+  MOSLR::scale_fill_MOSL(colours = c("grey", "light blue", "orange")) +
+  theme_bw() +
+    theme(legend.position = "top") +
+  labs(
+    title = "Meter Read Status of SKIP Code Categories",
+    subtitle = "Comparison of meter read status by retailer control",
+    x = "",
+    y = "",
+    fill = ""
+  )
+
+```
+
+### Themes read status {.unlisted .unnumbered}
+
+```{r, fig.height=10, fig.width=12, message=FALSE, warning=FALSE, error=FALSE}
+
+skips_lum %>%
+  ggplot(aes(reorder(SkipCodeTheme, Proportion), Proportion)) +
+  geom_col(aes(fill = SkipControlAdj), col = "black")  +
+  geom_text(aes(
+    label = scales::percent(Proportion, accuracy = 0.1), 
+    y = Proportion + 0.03
+    )
+    ) + 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) + 
+  MOSLR::scale_fill_MOSL(colours = c("grey", "light blue", "orange")) +
+  theme_bw() +
+  theme(legend.position = "top") + 
+  labs(
+    title = "Meter Read Status of SKIP Code Themes",
+    subtitle = "Percentage of meters that have been read by SKIP code theme",
+    x = "", y = "", 
+    fill = ""
+  ) + 
+  coord_flip()
+
+```
+
+### Read status vs. SKIP count {.unlisted .unnumbered}  
+  
+```{r, fig.height=7, fig.width=12, message=FALSE, error=FALSE, warning = FALSE}
+
+missing_read <- skips_lum %>%
+  filter(SkipControlAdj == "Missing data")  %>%
+  pull(Proportion)
+
+skips_lum %>%
+  filter(SkipCodeTheme != "Uncategorised reason") %>%
+  ggplot(aes(n, Proportion)) + 
+  geom_hline(yintercept = missing_read, lty = "dashed", size = 1.4, col = MOSLR::MOSL_colours("orange"))  +
+  geom_point(aes(colour = SkipControlAdj), size = 3.5) +
+  ggrepel::geom_text_repel(aes(label = SkipCodeTheme)) + 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) + 
+  scale_x_continuous(limits = c(0, 420)) +
+  MOSLR::scale_colour_MOSL(colours = c("grey", "light blue", "orange")) +
+  theme_bw() +
+  theme(legend.position = "top") + 
+  labs(
+    title = "Meter Read Status of SKIP Code themes",
+    subtitle = "Percentage of meters that have been read against the total count of SKIPs by theme",
+    x = "Count of SKIPs", y = "Percentage of meters subsequently read", 
+    colour = ""
+  ) 
+```
+   
+## {.unlisted .unnumbered}
+
+## Performance failure allowance {.tabset}
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+tp_exposure <- scenarios_summary_tps %>% 
+  group_by(RetailerIdAnon) %>% 
+  mutate(Performance = mean(Performance, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  mutate(
+    Exposure = max(1 - Performance - 0.05, 0) * OutsideRetailerControl
+  )
+
+market_performance <- tp_exposure %>% 
+  filter(Scenario == scenario_labels[7]) %>% 
+  summarise(Performance = weighted.mean(Performance, TotalSkips)) %>% 
+  pull(Performance)
+            
+market_exposure <- tp_exposure %>% 
+  filter(Scenario == scenario_labels[7]) %>% 
+  summarise(Exposure = weighted.mean(Exposure, TotalSkips)) %>% 
+  pull(Exposure)
+
+market_charges <- tp_exposure %>% 
+  filter(Scenario == scenario_labels[7]) %>% 
+  summarise(
+    Charges = 1 - Performance - 0.05,
+    Charges = weighted.mean(Charges, TotalSkips)) %>% 
+  pull(Charges)
+  
+allowances <- seq(0, 1, by = 0.05)
+
+tp_exposure_seq <- tibble(Scenario = factor(), Allowance = numeric())
+
+for (allowance in allowances) {
+
+temp <- tp_exposure %>% 
+  mutate(Allowance = allowance) %>% 
+  group_by(RetailerIdAnon) %>% 
+  mutate(Performance = mean(Performance, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  mutate(Exposure = max(1 - Performance - Allowance, 0) * OutsideRetailerControl) %>% 
+  group_by(Scenario, Allowance) %>% 
+  summarise(Exposure = weighted.mean(Exposure, TotalSkips))
+
+tp_exposure_seq <- bind_rows(tp_exposure_seq, temp)
+
+}
+
+min_allowance <- tp_exposure_seq %>% 
+  filter(Exposure == 0) %>% 
+  summarise(Allowance = min(Allowance)) %>% 
+  pull(Allowance)
+
+```
+  
+Average MPS17, MPS18 and MPS19 performance across the same period for retailers in the sample was `r scales::percent(market_performance, accuracy = 0.1)`, meaning that, on average, `r scales::percent(1 - market_performance, accuracy = 0.1)` of total tasks were failed. We can calculate the total net exposure of retailers to performance failures outside their control as a percentage of total tasks after applying the allowance of 5% of total tasks. Applying our preferred probabilistic re-assignment scenario with `r scales::percent(scenarios_summary$OutsideRetailerControl[7], accuracy = 0.1)` of failures outside their control, we find that the average net exposure to performance failures outside their control to be `r scales::percent(market_exposure, accuracy = 0.1)` of total tasks. 
+
+We show below the net exposure to retailers after incorporating the allowance for 5% of total tasks in each control scenario.
+
+Based on a scenario analysis of net exposure to retailers by different levels allowance levels, we find that the minimum allowance level to cover all performance failures outside retailer control would be `r scales::percent(min_allowance, accuracy = 1)`.
+  
+### MPS Performance {.unlisted .unnumered}
+
+```{r, fig.height=6, messag=FALSE, error=FALSE, warning = FALSE}
+
+scenarios_summary_tps %>% 
+  filter(Scenario == scenario_labels[7]) %>% 
+  ggplot(aes(reorder(RetailerIdAnon, Performance), Performance)) + 
+  geom_col(aes(fill = RetailerType), colour = "black") +
+  geom_text(aes(label = scales::percent(Performance, accuracy = 1), y = Performance + 0.05)) + 
+  MOSLR::scale_fill_MOSL(reverse = TRUE) + 
+  scale_y_continuous(labels = scales::percent) + 
+  theme_bw() + 
+  theme(legend.position = "top") +
+  coord_flip() + 
+  labs(
+    title = "Retailer MPS Performance",
+    subtitle = "Average retailer performance of MPS17-19 between April-December 2021",
+    x = "", y = "", fill = ""
+  )
+
+```
+
+### Overall exposure {.unlisted .unnumbered}
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+  
+tp_exposure %>% 
+  group_by(Scenario) %>% 
+  summarise(Exposure = weighted.mean(Exposure, TotalSkips)) %>% 
+  ggplot(aes(Scenario, Exposure)) + 
+  geom_col(aes(fill = "MOSLR"), colour = "black") + 
+  geom_text(aes(label = scales::percent(Exposure, accuracy = 0.1), y = Exposure + 0.01)) +
+  MOSLR::scale_fill_MOSL() + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) + 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme_bw() + 
+  theme(legend.position = "none") +
+  labs(
+    title = "Retailer Exposure to Performance Failures Outside Control",
+    subtitle = "Failures outside retailer control adjusted by 5% allowance by scenario",
+    caption = "Note: Exposure is calculated as total performance failuresless 5% allowance\n multiplied by percent of failures outside retailer control",
+    x = "", y = "Exposure", fill = ""
+  )
+  
+```
+
+### Retailer exposure {.unlisted .unnumbered}
+
+```{r, fig.height=12, fig.width=10, message=FALSE, error=FALSE, warning = FALSE}
+  
+tp_exposure %>% 
+  ggplot() + 
+  geom_col(aes(reorder_within(RetailerIdAnon, Exposure, Scenario), Exposure, fill = RetailerType), colour = "black") + 
+  scale_x_reordered() +
+  MOSLR::scale_fill_MOSL(reverse = TRUE) + 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  coord_flip() + 
+  theme_bw() + 
+  theme(legend.position = "none") +
+  facet_wrap(~Scenario, scales = "free_y") + 
+  labs(
+    title = "Retailer Exposure to Performance Failures",
+    subtitle = "Performance charges outside retailer control adjusted by 5% allowance",
+    caption = "Note: Exposure is calculated as total performance failuresless 5% allowance\n multiplied by percent of failures outside retailer control",
+    x = "", y = "Exposure", fill = ""
+  )
+  
+```
+
+### Allowance scenarios {.unlisted .unnumbered}
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+
+tp_exposure_seq %>% 
+  ggplot() + 
+  geom_line(aes(Allowance, Exposure, colour = Scenario), size = 1) + 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) + 
+  scale_x_continuous(labels = scales::percent) + 
+  theme_bw() +
+  theme(legend.position = "right") + 
+  MOSLR::scale_colour_MOSL() + 
+  labs(
+    title = "Exposure by Allowance Scenarios",
+    subtitle = "Net exposure to retailer performance charges by range of allowance values",
+    x = "Allowance", y = "Exposure", colour = ""
+  )
+  
+```
+
+## {.unlisted .unnumbered}
+
+# Conclusion
+
+## Findings and recommendations
+
+This report shows MOSL's analysis of the SKIP codes provided to MOSL to assess the extent in which performance failures are within retailers' control. 
+
+After radically updating our initial assumptions using text and theme analysis of the SKIP data we were able to more accurately categorise the SKIPs and performance failures. 
+
+We found that performance failures in the sample likely to be outside retailer control has a large range between 30-80%, in particular due to having several options for treating the 40% of performance failures that were unspecified or uncategorised by retailers or lacked any detailed information that would enable MOSL to reliably assign control of the performance failure. 
+
+Based on our assessment, we have recommended using our classification model to re-assign control, which would suggest approximately 40% of performance failures were outside retailer control.
+
+We then considered the relationship of these performance failures with the 5% allowance of total MPS18 and MPS19 tasks. We found the "net exposure" of retailers to charges outside their control was 5% and that  a minimum allowance of 20% would be required to eliminate the net exposure to failures outside retailer control. 
+
+Our recommendations are the following:
+
+* The charging framework should be reviewed as a high priority as part of the MPF reform due to the relatively high level of performance failures outside retailer control
+* In particular, a more detailed review of performance failures outside retailer control (especially access issues) is required to fully assess their impact and identify mitigations and/or resolutions
+* However, whilst the level of performance failures outside retailer control is high, we note that this is at least partially mitigated by the allowance; and so it is questionable whether an immediate and full suspension of MPS charges is justified given the average 5% net exposure to retailers after taking into account the 5% allowance
+* Another possible near-term response to consider would be to sufficiently increase the 5% allowance to reduce or eliminate retailer's net exposure to performance failures outside their control.
+
+We also note the following points:
+
+* Longer, more detailed SKIP descriptions indicate performance failures that are more likely to be outside retailer control, whereas shorter SKIP descriptions are more likely to be within retailer control; and this may indicate that meter reading service providers generally provide more detail when the wholesaler needs to resolve an issue.
+* Retailers with higher performance are more likely to have a higher proportion of performance failures outside their control, whereas poor performers tend to have a more balanced mix of failures within and outside their control: this could be because good-performers would be expected to succeed on tasks within their control but fail on those outside their control, whereas the failures of poor-performers would be more randomly distributed between outside and within their control
+* On average, meter read failures outside the retailer's control (and which are largely within the wholesaler's control) are more likely to become and remain long unread, which would lead to repeat performance charges; whereas, those within retailer control are more likely to be resolved or not become long unread in the first place.
+
+## Limitations of the study
+
+This study was based on a random sample of performance failures and for a limited time-period. A disproportionate high number of self-supply responded, and a low number of unassociated retailers, which may indicate bias in the dataset. We also did not consider any time or seasonality effects and did not fully explore differences between retailer types or sizes, nor the interactions with wholesaler/geographic regions. Taking these factors into account would require a more detailed study of performance failures in general and was therefore outside the current scope. The text analysis could have also been further extended by delving deeper into sentence structure using Natural Language Processing (NLP) techniques and analysing the abbreviations and misspellings to better categorise the underlying categories; however, the added-value of this would be low or even counter-productive as the SKIP descriptions are generally basic and limited to short phrases or words. 
